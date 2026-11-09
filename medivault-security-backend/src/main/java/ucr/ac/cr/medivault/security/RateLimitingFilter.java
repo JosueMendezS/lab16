@@ -6,22 +6,22 @@ import jakarta.servlet.http.*;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
+import org.springframework.util.StringUtils;
 import org.springframework.web.filter
         .OncePerRequestFilter;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Component
 public class RateLimitingFilter
         extends OncePerRequestFilter {
 
-    // Login: 10 peticiones por minuto
-    private final Bucket authBucket = Bucket.builder()
-            .addLimit(Bandwidth.classic(10,
-                Refill.intervally(10,
-                    Duration.ofMinutes(1))))
-            .build();
+    // Un bucket de login por cada IP
+    private final Map<String, Bucket> loginBuckets =
+            new ConcurrentHashMap<>();
 
     // Expedientes: 30 peticiones por minuto
     private final Bucket apiBucket = Bucket.builder()
@@ -29,6 +29,25 @@ public class RateLimitingFilter
                 Refill.intervally(30,
                     Duration.ofMinutes(1))))
             .build();
+
+    // Login: 5 intentos por minuto por IP
+    private Bucket nuevoBucketLogin() {
+        return Bucket.builder()
+                .addLimit(Bandwidth.classic(5,
+                    Refill.intervally(5,
+                        Duration.ofMinutes(1))))
+                .build();
+    }
+
+    public static String obtenerIp(
+            HttpServletRequest request) {
+        String xff = request.getHeader(
+                "X-Forwarded-For");
+        if (StringUtils.hasText(xff)) {
+            return xff.split(",")[0].trim();
+        }
+        return request.getRemoteAddr();
+    }
 
     @Override
     protected void doFilterInternal(
@@ -41,7 +60,9 @@ public class RateLimitingFilter
         Bucket target = null;
 
         if (path.startsWith("/api/v1/auth/login")) {
-            target = authBucket;
+            target = loginBuckets.computeIfAbsent(
+                obtenerIp(request),
+                ip -> nuevoBucketLogin());
         } else if (path.startsWith(
                 "/api/v1/expedientes")) {
             target = apiBucket;
@@ -52,7 +73,6 @@ public class RateLimitingFilter
                 filterChain.doFilter(
                     request, response);
             } else {
-                // Rate Limit superado: HTTP 429
                 response.setStatus(
                     HttpStatus
                         .TOO_MANY_REQUESTS.value()
